@@ -1,7 +1,7 @@
 -module(client_handler).
--export([start/1, handle_client/2]).
+-export([start/1, handle_client/2, process_command/3]).
 
--import(account_manager, [process_request/0]).
+-import(account_manager, [process_request/0, validate_login/2]).
 -import(movement, [move_forward/1, turn_left/1, turn_right/1]).
 
 -record(player, {id, x, y, direction}).  
@@ -17,7 +17,7 @@ loop(ListenSocket) ->
 
 
 initialize_player(Socket) -> 
-    NewPlayer = #player{id = 1, x = 0, y = 0, direction = 0},
+    NewPlayer = #player{id = 1, x = 500, y = 500, direction = 0},
     io:format("New client connected. Player ID: ~p~n", [NewPlayer#player.id]),  % Debug print
     handle_client(Socket, NewPlayer).
 
@@ -34,9 +34,24 @@ handle_client(Socket, Player) ->
             gen_tcp:close(Socket)
     end.
 
-process_command(Socket, Command, Player) ->
-    io:format("Processing command: ~p~n", [Command]),  % Debug print
+process_command(Socket, NetData, Player) ->
+    io:format("Processing command: ~p~n", [NetData]),  % Debug print
+    [Command | Data] = string:split(NetData, " "),
     case Command of
+        "login" -> 
+            io:format("Handling login with Data: ~p~n", [Data]),
+            [Username | Password] = string:split(hd(Data), " "),
+            io:format("Trying login with: ~p~n", [Username]),  % Debug print
+            io:format("Trying login with: ~p~n", [hd(Password)]),  % Debug print
+            Result = account_manager:validate_login(Username, Username),
+            case Result of
+                {ok, _} ->
+                    io:format("Login successful for: ~p~n", [Username]),  % Debug print
+                    gen_tcp:send(Socket, "login_success\n");
+                _ -> 
+                    gen_tcp:send(Socket, "login_failed\n")
+            end,
+            Player;
         "a" ->
             %% Turn the player left
             NewPlayer = movement:turn_left(Player),
@@ -59,7 +74,7 @@ process_command(Socket, Command, Player) ->
 send_updated_position(Socket, Player) ->
     %% Send updated position to the client
     io:format("updated position: ~p,~p,~p", [Player#player.x, Player#player.y, Player#player.direction]),  % Debug print
-    UpdatedPosition = io_lib:format("~p,~p\n", [Player#player.x, Player#player.y]),
+    UpdatedPosition = io_lib:format("player_coords ~p ~p ~p\n", [Player#player.id, Player#player.x, Player#player.y]),
     gen_tcp:send(Socket, UpdatedPosition).
 
 
