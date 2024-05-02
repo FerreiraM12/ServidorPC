@@ -1,7 +1,7 @@
 -module(client_handler).
 -export([start/1, handle_client/2, process_command/3]).
 
--import(account_manager, [process_request/0, validate_login/2]).
+-import(account_manager, [create_account/2, validate_login/2]).
 -import(movement, [move_forward/1, turn_left/1, turn_right/1]).
 
 -record(player, {id, x, y, direction}).  
@@ -43,10 +43,21 @@ process_command(Socket, NetData, Player) ->
             [Username | Password] = string:split(hd(Data), " "),
             io:format("Trying login with: ~p~n", [Username]),  % Debug print
             io:format("Trying login with: ~p~n", [hd(Password)]),  % Debug print
-            Result = account_manager:validate_login(Username, Username),
+            Result = account_manager:validate_login(Username, hd(Password)),
             case Result of
                 {ok, _} ->
                     io:format("Login successful for: ~p~n", [Username]),  % Debug print
+                    gen_tcp:send(Socket, "login_success\n");
+                _ -> 
+                    gen_tcp:send(Socket, "login_failed\n")
+            end,
+            Player;
+        "new_account" ->
+            [Username | Password] = string:split(hd(Data), " "),
+            Result = account_manager:create_account(Username, hd(Password)),
+            case Result of
+                {ok, _} ->
+                    io:format("Account created successfully for: ~p~n", [Username]),  % Debug print
                     gen_tcp:send(Socket, "login_success\n");
                 _ -> 
                     gen_tcp:send(Socket, "login_failed\n")

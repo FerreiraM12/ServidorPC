@@ -1,16 +1,15 @@
 -module(account_manager).
--export([process_request/1, validate_login/2]).
+-export([create_account/2, validate_login/2]).
 
-process_request(Data) ->
-    {Username, Password} = parse_data(Data),
+create_account(Username, Password) ->
     case check_username_exists(Username) of
         {ok, true} ->
-            "Error: Username already exists\n";
+            {notok, "Error: Username already exists\n"};
         {ok, false} ->
-            ok = save_account(Username, Password),
-            "Account created\n";
+            save_account(Username, Password),
+            {ok, "Account created\n"};
         {error, _} ->
-            "Error: An error occurred\n"
+            {error, "Error: An error occurred\n"}
     end.
 
 validate_login(Username, Password) ->
@@ -96,7 +95,3 @@ check_username_exists_in_file(File, Username) ->
         {error, Reason} ->
             {error, Reason}
     end.
-
-parse_data(Data) ->
-    [Username, Password] = string:split(Data, " "),
-    {Username, Password}.
