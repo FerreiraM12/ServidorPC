@@ -1,115 +1,174 @@
 -module(client_handler).
--export([start/1, handle_client/2, process_command/3]).
-
+-export([start/1, game_session_handler/1, handle_client/1, process_command/2, enqueue_player/1, start_game/1, handle_login/2, handle_create_account/2]).
 -import(account_manager, [create_account/2, validate_login/2]).
 -import(movement, [move_forward/1, turn_left/1, turn_right/1]).
 
--record(player, {id, x, y, direction}).  
+-define(MAX_PLAYERS_PER_GAME, 4).
 
+-record(player, {id, socket, x, y, direction, level = 1, locked = false, consecutive_wins = 0, consecutive_losses = 0, gamePid = 0}).
+
+%% Entry point to start the server listening on a specified port.
 start(Port) ->
-    init_ets_table(),
+    init_ets_queue(),
     {ok, ListenSocket} = gen_tcp:listen(Port, [{active, false}, {packet, 0}, {reuseaddr, true}]),
-    loop(ListenSocket).
+    io:format("Server started, listening on port ~p~n", [Port]),
+    accept_connections(ListenSocket).
+    %loop(ListenSocket).
 
-init_ets_table() ->
-    case ets:info(client_sockets) of
-        undefined -> ets:new(client_sockets, [named_table, set, public]);
-        _ -> ok
-    end.
+init_ets_queue() ->
+    ets:new(player_queue, [named_table, set, public, {keypos, 1}]).
+
+accept_connections(ListenSocket) ->
+    spawn(fun() -> loop(ListenSocket) end).
 
 loop(ListenSocket) ->
     {ok, Socket} = gen_tcp:accept(ListenSocket),
-    spawn(fun() -> initialize_player(Socket) end),  % Initialize the player record here
+    spawn(fun() -> handle_connection(Socket) end),
     loop(ListenSocket).
 
+handle_connection(Socket) ->
+    NewPlayer = initialize_player(Socket),
+    handle_client(NewPlayer).
 
-initialize_player(Socket) -> 
-    PlayerId = next_player_id(),
-    NewPlayer = #player{id = PlayerId, x = 500, y = 500, direction = 0},
-    ets:insert(client_sockets, {Socket, NewPlayer}),
-    io:format("New client connected. Player ID: ~p~n", [NewPlayer#player.id]),  % Debug print
-    handle_client(Socket, NewPlayer).
+initialize_player(Socket) ->
+    NewPlayer = #player{id = erlang:unique_integer() rem 500, socket = Socket, x = 500, y = 500, direction = 0},
+    io:format("New client connected. Player ID: ~p~n", [NewPlayer#player.id]),
+    NewPlayer.
 
-next_player_id() ->
-    case ets:info(client_sockets) of
-        undefined -> 1;
-        _ -> ets:info(client_sockets, size) + 1
-    end.
-
-handle_client(Socket, Player) ->
-    case gen_tcp:recv(Socket, 0) of
+%% Handles incoming data from the client.
+handle_client(Player) ->
+    case gen_tcp:recv(Player#player.socket, 0) of
         {ok, Data} ->
-            io:format("Received data from client: ~p~n", [Data]),  % Debug print
-            NewPlayer = process_command(Socket, Data, Player),
-            send_updated_position(Socket, NewPlayer),
-            handle_client(Socket, NewPlayer);
+            io:format("Received data from player ~p: ~p~n", [Player#player.id, Data]),
+            UpdatedPlayer = process_command(Data, Player),
+            handle_client(UpdatedPlayer); % Recursively handle the next command with updated player
         {error, Reason} ->
-            io:format("Error reading data from client: ~p~n", [Reason]),  % Debug print
-            ets:delete(client_sockets, Socket),
-            gen_tcp:send(Socket, "Erro: Não foi possível ler os dados\n"),
-            gen_tcp:close(Socket)
+            io:format("Client disconnected: ~p~n", [Reason]),
+            ets:delete(player_queue, Player#player.id),
+            gen_tcp:close(Player#player.socket)
     end.
 
-process_command(Socket, NetData, Player) ->
-    io:format("Processing command: ~p~n", [NetData]),  % Debug print
-    [Command | Data] = string:split(NetData, " "),
+%% Processes commands received from the client.
+process_command(Data, Player) ->
+    CommandList = string:split(Data, " ", all),
+    Command = hd(CommandList),
+    io:format("Processing command ~p from player ~p~n", [Command, Player#player.id]),
     case Command of
-        "login" -> 
-            io:format("Handling login with Data: ~p~n", [Data]),
-            [Username | Password] = string:split(hd(Data), " "),
-            io:format("Trying login with: ~p~n", [Username]),  % Debug print
-            io:format("Trying login with: ~p~n", [hd(Password)]),  % Debug print
-            Result = account_manager:validate_login(Username, hd(Password)),
-            case Result of
-                {ok, _} ->
-                    io:format("Login successful for: ~p~n", [Username]),  % Debug print
-                    gen_tcp:send(Socket, "login_success\n");
-                _ -> 
-                    gen_tcp:send(Socket, "login_failed\n")
-            end,
-            Player;
+        "login" ->
+            handle_login(CommandList, Player);
         "new_account" ->
-            [Username | Password] = string:split(hd(Data), " "),
-            Result = account_manager:create_account(Username, hd(Password)),
-            case Result of
-                {ok, _} ->
-                    io:format("Account created successfully for: ~p~n", [Username]),  % Debug print
-                    gen_tcp:send(Socket, "login_success\n");
-                _ -> 
-                    gen_tcp:send(Socket, "login_failed\n")
-            end,
-            Player;
+            handle_create_account(CommandList, Player);
         "a" ->
-            %% Turn the player left
             NewPlayer = movement:turn_left(Player),
-            update_player(Socket, NewPlayer),
+            Player#player.gamePid ! {update, NewPlayer},
             NewPlayer;
         "d" ->
-            %% Turn the player right
             NewPlayer = movement:turn_right(Player),
-            update_player(Socket, NewPlayer),
+            Player#player.gamePid ! {update, NewPlayer},
             NewPlayer;
         "w" ->
-            %% Move the player forward
             NewPlayer = movement:move_forward(Player),
-            update_player(Socket, NewPlayer),
+            Player#player.gamePid ! {update, NewPlayer},
             NewPlayer;
         "q" ->
-            gen_tcp:send(Socket, "Quitting game\n"),
-            ets:delete(client_sockets, Socket),
-            gen_tcp:close(Socket);
+            gen_tcp:send(Player#player.socket, "Quitting game\n"),
+            ets:delete(player_queue, Player#player.id),
+            gen_tcp:close(Player#player.socket),
+            Player; % Ensure to return the modified player or a flag to stop further processing
+        "gamePid" ->
+            io:format("Received game PID from player ~p~n", [Player#player.id]),
+            NewPlayer = Player#player{gamePid = list_to_pid(hd(tl(CommandList)))},
+            io:format("Player ~p~n: ", [NewPlayer]),
+            list_to_pid(hd(tl(CommandList))) ! ola,
+            NewPlayer;
         _ ->
-            gen_tcp:send(Socket, "Invalid command\n")
+            gen_tcp:send(Player#player.socket, "Invalid command\n"),
+            Player
     end.
 
-update_player(Socket, Player) ->
-    ets:insert(client_sockets, {Socket, Player}).
+%% Handles login functionality.
+handle_login([_, Username, Password], Player) ->
+    case account_manager:validate_login(Username, Password) of
+        {ok, Level} ->
+            UpdatedPlayer = Player#player{level = Level, locked = true},
+            gen_tcp:send(Player#player.socket, "login_success\n"),
+            io:format("Login successful for ~p~n", [Username]),
+            enqueue_player(UpdatedPlayer),
+            UpdatedPlayer;
+        {error, _} ->
+            io:format("Login failed for ~p~n", [Username]),
+            gen_tcp:send(Player#player.socket, "Login failed\n"),
+            Player
+    end.
 
-send_updated_position(_, Player) ->
-    %% Broadcast updated position to all clients
-    UpdatedPosition = io_lib:format("player_coords ~p ~p ~p\n", [Player#player.id, Player#player.x, Player#player.y]),
-    io:format("Broadcasting updated position: ~p~n", [UpdatedPosition]),  % Debug print
-    AllClients = ets:tab2list(client_sockets),
-    lists:foreach(fun({ClientSocket, _}) -> 
-        gen_tcp:send(ClientSocket, UpdatedPosition)
-    end, AllClients).
+%% Handles account creation functionality.
+handle_create_account([_, Username, Password], Player) ->
+    io:format("Handling account creation for ~p~n", [Username]),
+    case account_manager:create_account(Username, Password) of
+        {ok, _} ->
+            gen_tcp:send(Player#player.socket, "Account created successfully\n"),
+            io:format("Account created for ~p~n", [Username]),
+            Player;
+        _ ->
+            gen_tcp:send(Player#player.socket, "Account creation failed\n"),
+            io:format("Account creation failed for ~p~n", [Username]),
+            Player
+    end.
+
+%% Enqueues the player in the global queue
+enqueue_player(Player) ->
+    io:format("Enqueuing player ~p~n", [Player#player.id]),
+    ets:insert(player_queue, {Player#player.id, Player}),
+    matchmaking:try_matchmaking().
+
+%% Starts a new game session with the given players.
+start_game(Players) ->
+    GamePid = spawn_link(fun() -> game_session_handler(Players) end),
+    lists:foreach(fun(P) -> gen_tcp:send(P#player.socket, io_lib:format("Game_started ~p\n", [GamePid])) end, Players),
+
+    io:format("Game session started with PID ~p~n", [GamePid]).
+
+game_session_handler(Players) ->
+    loop_update(Players).
+
+%% Recursively updates game state and sends position updates to all players.
+loop_update(Players) ->
+    broadcast_positions(Players),
+    timer:sleep(50),  % Sleep for 50 milliseconds before the next update
+    receive
+        {update, Player} -> 
+            NewPlayers = lists:map(fun(P) ->
+            case P#player.id == Player#player.id of
+                true -> Player;
+                false -> P
+            end
+        end, Players)
+    end,
+    loop_update(NewPlayers).
+
+%% Broadcasts the current position of each player to all players.
+broadcast_positions(Players) ->
+    Positions = lists:map(fun(P) -> {P#player.id, P#player.x, P#player.y, P#player.direction} end, Players),
+    lists:foreach(fun(P) ->
+        PositionData = lists:map(fun({Id, X, Y, Dir}) ->
+            io_lib:format("player_pos ~p ~p ~p ~p\n", [Id, X, Y, Dir])
+        end, Positions),
+        gen_tcp:send(P#player.socket, string:join(PositionData, ""))
+    end, Players).
+
+%% Update player level
+update_player_level(Player, Outcome) ->
+    NewWins = case Outcome of
+        win -> Player#player.consecutive_wins + 1;
+        lose -> 0
+    end,
+    NewLosses = case Outcome of
+        lose -> Player#player.consecutive_losses + 1;
+        win -> 0
+    end,
+    {NewLevel, ResetWins, ResetLosses} = case {NewWins, NewLosses} of
+        {Wins, _} when Wins >= Player#player.level -> {Player#player.level + 1, 0, Player#player.consecutive_losses};
+        {_, Losses} when Losses >= trunc(Player#player.level / 2) -> {max(Player#player.level - 1, 1), Player#player.consecutive_wins, 0};
+        _ -> {Player#player.level, NewWins, NewLosses}
+    end,
+    Player#player{level = NewLevel, consecutive_wins = ResetWins, consecutive_losses = ResetLosses}.

@@ -7,7 +7,7 @@
 
 -export([move_forward/1, turn_left/1, turn_right/1]).
 
--record(player, {id, x, y, direction}).
+-record(player, {id, socket, x, y, direction, level = 1, locked = false, consecutive_wins = 0, consecutive_losses = 0, gamePid = 0}).
 
 to_radians(Degrees) ->
     Degrees * math:pi() / 180.
@@ -16,8 +16,8 @@ to_radians(Degrees) ->
 move_forward(Player) ->
   XDelta = math:cos(to_radians(math:floor(Player#player.direction))),
   YDelta = math:sin(to_radians(math:floor(Player#player.direction))),
-  NewX = Player#player.x + XDelta,
-  NewY = Player#player.y + YDelta,
+  NewX = Player#player.x + XDelta * 10,
+  NewY = Player#player.y + YDelta * 10,
   Player#player{x = NewX, y = NewY}.
 
 %% Turn the player to the left
