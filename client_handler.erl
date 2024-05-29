@@ -1,11 +1,12 @@
 -module(client_handler).
--export([start/1, game_session_handler/1, handle_client/1, process_command/2, enqueue_player/1, start_game/1, handle_login/2, handle_create_account/2]).
+-export([start/1, game_session_handler/2, handle_client/1, process_command/2, enqueue_player/1, start_game/1, handle_login/2, handle_create_account/2]).
 -import(account_manager, [create_account/2, validate_login/2]).
 -import(movement, [move_forward/1, turn_left/1, turn_right/1]).
 
 -define(MAX_PLAYERS_PER_GAME, 4).
 
 -record(player, {id, socket, x, y, direction, level = 1, locked = false, consecutive_wins = 0, consecutive_losses = 0, gamePid = 0}).
+-record(planet, {id, positionX, positionY}).
 
 %% Entry point to start the server listening on a specified port.
 start(Port) ->
@@ -52,7 +53,7 @@ handle_client(Player) ->
 process_command(Data, Player) ->
     CommandList = string:split(Data, " ", all),
     Command = hd(CommandList),
-    io:format("Processing command ~p from player ~p~n", [Command, Player#player.id]),
+    %io:format("Processing command ~p from player ~p~n", [Command, Player#player.id]),
     case Command of
         "login" ->
             handle_login(CommandList, Player);
@@ -123,18 +124,18 @@ enqueue_player(Player) ->
 
 %% Starts a new game session with the given players.
 start_game(Players) ->
-    GamePid = spawn_link(fun() -> game_session_handler(Players) end),
+    % create a list with 3 planets
+    Planets = [{planet, 1, 100, 100}, {planet, 2, 200, 200}, {planet, 3, 300, 300}],
+    GamePid = spawn_link(fun() -> game_session_handler(Players, Planets) end),
     lists:foreach(fun(P) -> gen_tcp:send(P#player.socket, io_lib:format("Game_started ~p\n", [GamePid])) end, Players),
 
     io:format("Game session started with PID ~p~n", [GamePid]).
 
-game_session_handler(Players) ->
-    loop_update(Players).
+game_session_handler(Players, Planets) ->
+    loop_update(Players, Planets, 0).
 
 %% Recursively updates game state and sends position updates to all players.
-loop_update(Players) ->
-    broadcast_positions(Players),
-    timer:sleep(50),  % Sleep for 50 milliseconds before the next update
+loop_update(Players, Planets, I) ->
     receive
         {update, Player} -> 
             NewPlayers = lists:map(fun(P) ->
@@ -143,8 +144,36 @@ loop_update(Players) ->
                 false -> P
             end
         end, Players)
+        after 0 -> NewPlayers = Players
     end,
-    loop_update(NewPlayers).
+    broadcast_positions(Players),
+    if I rem 10 == 0 ->
+        NewPlanets = update_planets_positions(Planets, 20),
+        broadcast_planets_positions(Players, NewPlanets);
+    true -> NewPlanets = Planets
+    end,
+    timer:sleep(50),  % Sleep for 50 milliseconds before the next update
+    loop_update(NewPlayers, NewPlanets, (I + 1) rem 10).
+
+broadcast_planets_positions(Players, Planets) ->
+    Positions = lists:map(fun(P) -> {P#planet.id, P#planet.positionX, P#planet.positionY} end, Planets),
+    lists:foreach(fun(P) ->
+        PositionData = lists:map(fun({Id, X, Y}) ->
+            io_lib:format("planet_pos ~p ~p ~p~n", [Id, X, Y])
+        end, Positions),
+        
+        gen_tcp:send(P#player.socket, string:join(PositionData, ""))
+    end, Players).
+
+update_planets_positions(Planets, AngleIncrement) ->
+    lists:map(fun(P) ->
+        Radius = math:sqrt((P#planet.positionX - 500) * (P#planet.positionX - 500) + (P#planet.positionY - 400) * (P#planet.positionY - 400)),
+        CurrentAngle = (math:atan2(P#planet.positionY-400, P#planet.positionX-500) * 360) / (2 * math:pi()),
+        NewX = Radius * math:cos(2 * math:pi() * (CurrentAngle + AngleIncrement) / 360) + 500,
+        NewY = Radius * math:sin(2 * math:pi() * (CurrentAngle + AngleIncrement) / 360) + 400,
+        io:format("Planet ~p: ~p, ~p -> ~p, ~p~n", [P#planet.id, P#planet.positionX, P#planet.positionY, NewX, NewY]),
+        P#planet{positionX = NewX, positionY = NewY}
+    end, Planets).
 
 %% Broadcasts the current position of each player to all players.
 broadcast_positions(Players) ->
