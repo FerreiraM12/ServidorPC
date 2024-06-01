@@ -15,7 +15,6 @@ start(Port) ->
     {ok, ListenSocket} = gen_tcp:listen(Port, [{active, false}, {packet, 0}, {reuseaddr, true}]),
     io:format("Server started, listening on port ~p~n", [Port]),
     accept_connections(ListenSocket).
-    %loop(ListenSocket).
 
 init_ets_queue() ->
     ets:new(player_queue, [named_table, set, public, {keypos, 1}]).
@@ -54,17 +53,10 @@ handle_client(Player) ->
             NewPlayer#player.gamePid ! {update_position, NewPlayer},
             send_position_update(NewPlayer)
     end,
-    % Set a timeout for receiving data, here 50ms is chosen arbitrarily, adjust as needed
-    case gen_tcp:recv(NewPlayer#player.socket, 0) of%without timeout
+    case gen_tcp:recv(NewPlayer#player.socket, 0) of
         {ok, Data} ->
-            %io:format("Received data from player ~p: ~p~n", [NewPlayer#player.id, Data]),
-            %% Process the received command and continue handling
             UpdatedPlayer = process_command(Data, NewPlayer),
             handle_client(UpdatedPlayer);
-        %{error, timeout} ->
-        %    io:format("Reached here everytime"),
-        %    %% No data received, just update the position and check again
-        %    handle_client(NewPlayer);
         {error, Reason} ->
             io:format("Client disconnected: ~p~n", [Reason]),
             ets:delete(player_queue, NewPlayer#player.id),
@@ -76,7 +68,6 @@ handle_client(Player) ->
 process_command(Data, Player) ->
     CommandList = string:split(Data, " ", all),
     Command = hd(CommandList),
-    %io:format("Processing command ~p from player ~p~n", [Command, Player#player.id]),
     case Command of
         "login" ->
             handle_login(CommandList, Player);
@@ -98,7 +89,7 @@ process_command(Data, Player) ->
             gen_tcp:send(Player#player.socket, "Quitting game\n"),
             ets:delete(player_queue, Player#player.id),
             gen_tcp:close(Player#player.socket),
-            Player; % Ensure to return the modified player or a flag to stop further processing
+            Player; 
         "gamePid" ->
             io:format("Received game PID from player ~p~n", [Player#player.id]),
             NewPlayer = Player#player{gamePid = list_to_pid(hd(tl(CommandList)))},
@@ -203,7 +194,6 @@ update_player_position(Player) ->
     {Vx, Vy} = Player#player.velocity,
     NewX = Player#player.x + Vx,
     NewY = Player#player.y + Vy,
-    %io:format("Updating player ~p position to ~p, ~p~n", [Player#player.id, NewX, NewY]),
     Player#player{x = NewX, y = NewY}.
 
 %% Broadcasts the current position of each player to all players.
