@@ -2,7 +2,7 @@
 -export([enqueue_player/1, try_matchmaking/0, ready_to_play/1]).
 
 -define(MAX_PLAYERS_PER_GAME, 2).
--record(player, {id, socket, x, y, direction, level = 1, locked = false, consecutive_wins = 0, consecutive_losses = 0, gamePid = 0}).
+-record(player, {id, socket, x, y, direction, velocity = {0,0},  level = 1, locked = false, consecutive_wins = 0, consecutive_losses = 0, gamePid = 0}).
 
 % Enqueue player and check if a game can be started
 enqueue_player(Player) ->
