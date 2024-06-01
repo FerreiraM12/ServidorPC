@@ -3,9 +3,10 @@
 -import(account_manager, [create_account/2, validate_login/2]).
 -import(movement, [move_forward/1, turn_left/1, turn_right/1]).
 
--define(MAX_PLAYERS_PER_GAME, 4).
+-define(MAX_PLAYERS_PER_GAME, 2).
 
--record(player, {id, socket, x, y, direction, level = 1, locked = false, consecutive_wins = 0, consecutive_losses = 0, gamePid = 0}).
+
+-record(player, {id, socket, x, y, direction, velocity = {0,0}, level = 1, locked = false, consecutive_wins = 0, consecutive_losses = 0, gamePid = 0}).
 -record(planet, {id, positionX, positionY}).
 
 %% Entry point to start the server listening on a specified port.
@@ -32,22 +33,44 @@ handle_connection(Socket) ->
     handle_client(NewPlayer).
 
 initialize_player(Socket) ->
-    NewPlayer = #player{id = erlang:unique_integer() rem 500, socket = Socket, x = 500, y = 500, direction = 0},
+    NewPlayer = #player{id = erlang:unique_integer() rem 500, socket = Socket, x = 500, y = 500, direction = 0, gamePid = -1},
     io:format("New client connected. Player ID: ~p~n", [NewPlayer#player.id]),
     NewPlayer.
 
-%% Handles incoming data from the client.
+%% Function to send the current position to the player's client
+send_position_update(Player) ->
+    PositionData = io_lib:format("player_pos ~p ~p ~p\n", [Player#player.id, Player#player.x, Player#player.y]),
+    gen_tcp:send(Player#player.socket, PositionData).
+
+
+%% Handles incoming data from the client, updates player position continuously, and sends updates.
 handle_client(Player) ->
-    case gen_tcp:recv(Player#player.socket, 0) of
+    %% Update player's position before checking for new commands
+    NewPlayer = update_player_position(Player),
+    case NewPlayer#player.gamePid of
+        -1 ->
+            ok;
+        _  ->
+            NewPlayer#player.gamePid ! {update_position, NewPlayer},
+            send_position_update(NewPlayer)
+    end,
+    % Set a timeout for receiving data, here 50ms is chosen arbitrarily, adjust as needed
+    case gen_tcp:recv(NewPlayer#player.socket, 0) of%without timeout
         {ok, Data} ->
-            io:format("Received data from player ~p: ~p~n", [Player#player.id, Data]),
-            UpdatedPlayer = process_command(Data, Player),
-            handle_client(UpdatedPlayer); % Recursively handle the next command with updated player
+            %io:format("Received data from player ~p: ~p~n", [NewPlayer#player.id, Data]),
+            %% Process the received command and continue handling
+            UpdatedPlayer = process_command(Data, NewPlayer),
+            handle_client(UpdatedPlayer);
+        %{error, timeout} ->
+        %    io:format("Reached here everytime"),
+        %    %% No data received, just update the position and check again
+        %    handle_client(NewPlayer);
         {error, Reason} ->
             io:format("Client disconnected: ~p~n", [Reason]),
-            ets:delete(player_queue, Player#player.id),
-            gen_tcp:close(Player#player.socket)
+            ets:delete(player_queue, NewPlayer#player.id),
+            gen_tcp:close(NewPlayer#player.socket)
     end.
+
 
 %% Processes commands received from the client.
 process_command(Data, Player) ->
@@ -124,9 +147,9 @@ enqueue_player(Player) ->
 
 %% Starts a new game session with the given players.
 start_game(Players) ->
-    % create a list with 3 planets
     Planets = [{planet, 1, 100, 100}, {planet, 2, 200, 200}, {planet, 3, 300, 300}],
     GamePid = spawn_link(fun() -> game_session_handler(Players, Planets) end),
+
     lists:foreach(fun(P) -> gen_tcp:send(P#player.socket, io_lib:format("Game_started ~p\n", [GamePid])) end, Players),
 
     io:format("Game session started with PID ~p~n", [GamePid]).
@@ -136,23 +159,24 @@ game_session_handler(Players, Planets) ->
 
 %% Recursively updates game state and sends position updates to all players.
 loop_update(Players, Planets, I) ->
+    broadcast_positions(Players),
     receive
         {update, Player} -> 
             NewPlayers = lists:map(fun(P) ->
-            case P#player.id == Player#player.id of
+                case P#player.id == Player#player.id of
                 true -> Player;
                 false -> P
             end
         end, Players)
         after 0 -> NewPlayers = Players
     end,
-    broadcast_positions(Players),
+    broadcast_positions(NewPlayers),
     if I rem 10 == 0 ->
         NewPlanets = update_planets_positions(Planets, 20),
         broadcast_planets_positions(Players, NewPlanets);
     true -> NewPlanets = Planets
     end,
-    timer:sleep(50),  % Sleep for 50 milliseconds before the next update
+    timer:sleep(50),
     loop_update(NewPlayers, NewPlanets, (I + 1) rem 10).
 
 broadcast_planets_positions(Players, Planets) ->
@@ -161,7 +185,7 @@ broadcast_planets_positions(Players, Planets) ->
         PositionData = lists:map(fun({Id, X, Y}) ->
             io_lib:format("planet_pos ~p ~p ~p~n", [Id, X, Y])
         end, Positions),
-        
+
         gen_tcp:send(P#player.socket, string:join(PositionData, ""))
     end, Players).
 
@@ -174,6 +198,13 @@ update_planets_positions(Planets, AngleIncrement) ->
         io:format("Planet ~p: ~p, ~p -> ~p, ~p~n", [P#planet.id, P#planet.positionX, P#planet.positionY, NewX, NewY]),
         P#planet{positionX = NewX, positionY = NewY}
     end, Planets).
+
+update_player_position(Player) ->
+    {Vx, Vy} = Player#player.velocity,
+    NewX = Player#player.x + Vx,
+    NewY = Player#player.y + Vy,
+    %io:format("Updating player ~p position to ~p, ~p~n", [Player#player.id, NewX, NewY]),
+    Player#player{x = NewX, y = NewY}.
 
 %% Broadcasts the current position of each player to all players.
 broadcast_positions(Players) ->
